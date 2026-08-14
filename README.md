@@ -10,6 +10,13 @@ Version 0.4 adds a serialized WebSocket write queue, Discord Gateway v10
 session resume handling, heartbeat ACK monitoring, reconnect backoff with
 jitter, presence-update throttling, and reliable REST rate-limit retries.
 
+Credits
+-------
+This project was originally created by **Alex "Maddin4t0r" Martin**. This
+repository is a maintained fork that builds on his original SA:MP Discord
+connector, with later community contributions and compatibility/reliability
+updates. The original MIT copyright notice remains in [LICENSE](LICENSE).
+
 **How to install on an open.mp server**
 -----------------------------------
 1. Extract the contents of the archive to a directory, copy the file(s) in plugins into **COMPONENTS** if you do not do this, it will try to load as a SA:MP plugin instead.

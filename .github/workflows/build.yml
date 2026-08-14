@@ -33,10 +33,10 @@ jobs:
         include:
           - os: windows-2022
             build-type: Debug
-            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE'
+            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE -DUSING_BOOST_NO_CONAN=ON -DBOOST_ROOT=C:/local/boost_1_87_0'
           - os: windows-2022
             build-type: Release
-            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE'
+            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE -DUSING_BOOST_NO_CONAN=ON -DBOOST_ROOT=C:/local/boost_1_87_0'
           - os: ubuntu-22.04
             build-type: Debug
             cmake-args: '-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32 -DGH_ACBUILD=TRUE'
