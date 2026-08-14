@@ -6,6 +6,15 @@
 #include <boost/asio/system_timer.hpp>
 #include <boost/beast/version.hpp>
 
+namespace
+{
+	template <class StringView>
+	std::string StringViewToString(StringView const &value)
+	{
+		return std::string(value.data(), value.size());
+	}
+}
+
 Http::Http(std::string token) :
 	m_SslContext(asio::ssl::context::tlsv12_client),
 	m_Token(token),
@@ -93,7 +102,7 @@ void Http::NetworkThreadFunc()
 			}
 
 			// check if we're rate-limited
-			std::string bucket = GetBucketIdentifierFromURL(entry->Request->target().to_string());
+			std::string bucket = GetBucketIdentifierFromURL(StringViewToString(entry->Request->target()));
 			auto pr_it = bucket_ratelimit.find(bucket);
 			if (pr_it != bucket_ratelimit.end() && bucket != "INVALID")
 			{
@@ -109,7 +118,7 @@ void Http::NetworkThreadFunc()
 				// no, delete rate-limit and go on
 				bucket_ratelimit.erase(pr_it);
 				Logger::Get()->Log(samplog_LogLevel::DEBUG, "rate-limit on bucket '{}' lifted",
-					entry->Request->target().to_string());
+					StringViewToString(entry->Request->target()));
 			}
 
 			boost::system::error_code error_code;
@@ -132,8 +141,8 @@ void Http::NetworkThreadFunc()
 				if (error_code)
 				{
 					Logger::Get()->Log(samplog_LogLevel::ERROR, "Error while sending HTTP {} request to '{}': {}",
-						entry->Request->method_string().to_string(),
-						entry->Request->target().to_string(),
+						StringViewToString(entry->Request->method_string()),
+						StringViewToString(entry->Request->target()),
 						error_code.message());
 
 					do_reconnect = true;
@@ -144,8 +153,8 @@ void Http::NetworkThreadFunc()
 					if (error_code)
 					{
 						Logger::Get()->Log(samplog_LogLevel::ERROR, "Error while retrieving HTTP {} response from '{}': {}",
-							entry->Request->method_string().to_string(),
-							entry->Request->target().to_string(),
+							StringViewToString(entry->Request->method_string()),
+							StringViewToString(entry->Request->target()),
 							error_code.message());
 
 						do_reconnect = true;
@@ -158,7 +167,7 @@ void Http::NetworkThreadFunc()
 						{
 							try
 							{
-								retry_after_seconds = std::stod(retry_after->value().to_string());
+								retry_after_seconds = std::stod(StringViewToString(retry_after->value()));
 							}
 							catch (std::exception const &)
 							{
@@ -170,9 +179,9 @@ void Http::NetworkThreadFunc()
 							static_cast<long long>(retry_after_seconds * 1000.0) + 250);
 						auto response_bucket = response.find("X-RateLimit-Bucket");
 						if (response_bucket != response.end())
-							AddBucketIdentifierFromURL(entry->Request->target().to_string(),
-								response_bucket->value().to_string());
-						bucket = GetBucketIdentifierFromURL(entry->Request->target().to_string());
+							AddBucketIdentifierFromURL(StringViewToString(entry->Request->target()),
+								StringViewToString(response_bucket->value()));
+						bucket = GetBucketIdentifierFromURL(StringViewToString(entry->Request->target()));
 						auto global_header = response.find("X-RateLimit-Global");
 						bool is_global = global_header != response.end()
 							&& global_header->value() == "true";
@@ -182,7 +191,7 @@ void Http::NetworkThreadFunc()
 							bucket_ratelimit[bucket] = std::chrono::steady_clock::now() + retry_delay;
 						Logger::Get()->Log(samplog_LogLevel::WARNING,
 							"Discord rate-limited path '{}'; retrying in {} ms",
-							entry->Request->target().to_string(), retry_delay.count());
+							StringViewToString(entry->Request->target()), retry_delay.count());
 						skipped_entries.push_back(entry);
 						requeue_entry = true;
 						skip_entry = true;
@@ -214,14 +223,14 @@ void Http::NetworkThreadFunc()
 				auto bucket_identifier = response.find("X-RateLimit-Bucket");
 				if (bucket_identifier != response.end())
 				{
-					if (bucket_urls.find(bucket_identifier->value().to_string()) == bucket_urls.end())
+					if (bucket_urls.find(StringViewToString(bucket_identifier->value())) == bucket_urls.end())
 					{
 						//Logger::Get()->Log(samplog_LogLevel::ERROR, "{}", entry->Request->target().to_string());
-						AddBucketIdentifierFromURL(entry->Request->target().to_string(), bucket_identifier->value().to_string());
+						AddBucketIdentifierFromURL(StringViewToString(entry->Request->target()), StringViewToString(bucket_identifier->value()));
 					}
 				}
 
-				bucket = GetBucketIdentifierFromURL(entry->Request->target().to_string());
+				bucket = GetBucketIdentifierFromURL(StringViewToString(entry->Request->target()));
 				if (it_r->value().compare("0") == 0)
 				{
 					// we're now officially rate-limited
@@ -241,7 +250,7 @@ void Http::NetworkThreadFunc()
 					it_r = response.find("X-RateLimit-Reset-After");
 					if (it_r != response.end())
 					{
-						string const& reset_time_str = it_r->value().to_string();
+						string const reset_time_str = StringViewToString(it_r->value());
 						double reset_after_seconds = 1.0;
 						try
 						{
@@ -257,7 +266,7 @@ void Http::NetworkThreadFunc()
 						std::chrono::milliseconds timepoint_now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
 						Logger::Get()->Log(samplog_LogLevel::DEBUG, "rate-limiting bucket {} until {} (current time: {})",
 							bucket,
-							it_r->value().to_string(),
+							StringViewToString(it_r->value()),
 							timepoint_now.count());
 						TimePoint_t reset_time = std::chrono::steady_clock::now()
 							+ std::chrono::milliseconds(milliseconds.count() + 250); // add a buffer of 250 ms
@@ -418,7 +427,7 @@ void Http::SendRequest(beast::http::verb const method, std::string const &url,
 		callback = CreateResponseCallback([=](Response r)
 		{
 			Logger::Get()->Log(samplog_LogLevel::DEBUG, "{:s} {:s} [{:s}] --> {:d} {:s}: {:s}",
-				beast::http::to_string(method).to_string(), url, content, r.status, r.reason, r.body);
+				StringViewToString(beast::http::to_string(method)), url, content, r.status, r.reason, r.body);
 		});
 	}
 
@@ -438,7 +447,7 @@ Http::ResponseCallback_t Http::CreateResponseCallback(ResponseCb_t &&callback)
 
 	return [callback](Streambuf_t &sb, Response_t &resp)
 	{
-		callback({ resp.result_int(), resp.reason().to_string(),
+		callback({ resp.result_int(), StringViewToString(resp.reason()),
 			beast::buffers_to_string(resp.body().data()), beast::buffers_to_string(sb.data()) });
 	};
 }

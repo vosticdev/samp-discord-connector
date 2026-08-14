@@ -126,5 +126,8 @@ if(MSVC AND NOT MSVC_VERSION VERSION_LESS 1940)
 endif()
 
 add_subdirectory(libs/log-core)
+if(MSVC)
+	target_compile_definitions(log-core PRIVATE _SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING)
+endif()
 add_subdirectory(libs/omp-sdk)
 add_subdirectory(src)
