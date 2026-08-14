@@ -1,4 +1,4 @@
-﻿name: Build
+name: Build
 
 on:
   workflow_dispatch:
@@ -31,10 +31,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2022
             build-type: Debug
             cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE'
-          - os: windows-latest
+          - os: windows-2022
             build-type: Release
             cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE'
           - os: ubuntu-22.04
@@ -103,4 +103,3 @@ jobs:
       with:
         name: discord-connector-${{ env.REPO_TAG }}-${{ runner.os }}-${{ matrix.build-type }}
         path: ${{ runner.workspace }}/samp-discord-connector/build/artifact/discord-connector-${{ env.REPO_TAG }}-${{ runner.os }}-${{ matrix.build-type }}.zip
-
