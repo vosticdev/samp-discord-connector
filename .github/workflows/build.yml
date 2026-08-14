@@ -33,10 +33,10 @@ jobs:
         include:
           - os: windows-2022
             build-type: Debug
-            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE'
+            cmake-args: '-AWin32 -T v143,host=x86,version=14.39 -DGH_ACBUILD=TRUE'
           - os: windows-2022
             build-type: Release
-            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE'
+            cmake-args: '-AWin32 -T v143,host=x86,version=14.39 -DGH_ACBUILD=TRUE'
           - os: ubuntu-22.04
             build-type: Debug
             cmake-args: '-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32 -DGH_ACBUILD=TRUE'
