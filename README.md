@@ -32,17 +32,18 @@ from different versions.
 ### open.mp on Windows
 
 1. Extract the Windows archive into a temporary directory.
-2. Copy all three files from the archive's `plugins` directory into the
-   server's `components` directory:
+2. Copy only `discord-connector.dll` from the archive's `plugins` directory
+   into the server's `components` directory:
 
    ```text
    components/
-   |-- discord-connector.dll
-   |-- libcrypto-3.dll
-   `-- libssl-3.dll
+   `-- discord-connector.dll
    ```
 
-3. Copy `log-core2.dll` to the server root, next to `omp-server.exe`.
+3. Copy `libcrypto-3.dll`, `libssl-3.dll`, and `log-core2.dll` to the server
+   root, next to `omp-server.exe`. These runtime dependencies must not be put
+   in `components`: open.mp would try to load them as components, while the
+   Windows loader needs them beside the server executable.
 4. Copy `pawno/include/discord-connector.inc` from the archive into the include
    directory used to compile your gamemode. This is usually
    `qawno/include/discord-connector.inc` for open.mp, or
@@ -54,10 +55,10 @@ The resulting layout should contain:
 server/
 |-- omp-server.exe
 |-- log-core2.dll
+|-- libcrypto-3.dll
+|-- libssl-3.dll
 |-- components/
-|   |-- discord-connector.dll
-|   |-- libcrypto-3.dll
-|   `-- libssl-3.dll
+|   `-- discord-connector.dll
 `-- qawno/include/discord-connector.inc
 ```
 
