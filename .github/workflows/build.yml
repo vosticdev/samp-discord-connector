@@ -30,12 +30,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04]
-        build-type: [Debug, Release]
         include:
           - os: windows-latest
+            build-type: Debug
             cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE  -DUSING_BOOST_NO_CONAN=TRUE -DUSING_OPENSSL_NO_CONAN=TRUE -DBoost_NO_BOOST_CMAKE=ON'
-          - os: ubuntu-20.04
+          - os: windows-latest
+            build-type: Release
+            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE  -DUSING_BOOST_NO_CONAN=TRUE -DUSING_OPENSSL_NO_CONAN=TRUE -DBoost_NO_BOOST_CMAKE=ON'
+          - os: ubuntu-22.04
+            build-type: Debug
+            cmake-args: '-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32 -DGH_ACBUILD=TRUE'
+          - os: ubuntu-22.04
+            build-type: Release
             cmake-args: '-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32 -DGH_ACBUILD=TRUE'
 
     runs-on: ${{ matrix.os }}
@@ -44,7 +50,7 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: 2
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         submodules: recursive
 
@@ -83,7 +89,7 @@ jobs:
         sudo apt install gcc-multilib g++-multilib
 
     - name: Get python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: 3.9.0 # SemVer's version range syntax
 
@@ -109,7 +115,7 @@ jobs:
       shell: pwsh
       
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: discord-connector-${{ env.REPO_TAG }}-${{ runner.os }}-${{ matrix.build-type }}
         path: ${{ runner.workspace }}/samp-discord-connector/build/artifact/discord-connector-${{ env.REPO_TAG }}-${{ runner.os }}-${{ matrix.build-type }}.zip
