@@ -33,10 +33,10 @@ jobs:
         include:
           - os: windows-2022
             build-type: Debug
-            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE -DUSING_BOOST_NO_CONAN=ON -DBOOST_ROOT=C:/local/boost_1_87_0'
+            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE -DUSING_BOOST_NO_CONAN=ON -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake'
           - os: windows-2022
             build-type: Release
-            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE -DUSING_BOOST_NO_CONAN=ON -DBOOST_ROOT=C:/local/boost_1_87_0'
+            cmake-args: '-AWin32 -Thost=x86 -DGH_ACBUILD=TRUE -DUSING_BOOST_NO_CONAN=ON -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake'
           - os: ubuntu-22.04
             build-type: Debug
             cmake-args: '-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32 -DGH_ACBUILD=TRUE'
@@ -76,6 +76,10 @@ jobs:
       uses: actions/setup-python@v7
       with:
         python-version: '3.11'
+
+    - if: runner.os == 'Windows'
+      name: Install Windows Boost headers
+      run: vcpkg install boost-asio:x86-windows boost-beast:x86-windows boost-lockfree:x86-windows boost-spirit:x86-windows boost-variant:x86-windows
 
     - name: Install conan
       run: |
