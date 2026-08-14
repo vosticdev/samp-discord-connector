@@ -118,6 +118,13 @@ else()
 	add_conan_lib(CONAN_PKG::openssl openssl/1.1.1k)
 endif()
 
+# log-core carries its own cmake-conan 0.18 copy. Keep the actual compiler and
+# toolset selected by CMake, but expose the highest version that this legacy
+# detector understands; both MSVC 19.3x and 19.4x use Conan's VS 2022 ABI 17.
+if(MSVC AND NOT MSVC_VERSION VERSION_LESS 1940)
+	set(MSVC_VERSION 1939)
+endif()
+
 add_subdirectory(libs/log-core)
 add_subdirectory(libs/omp-sdk)
 add_subdirectory(src)
