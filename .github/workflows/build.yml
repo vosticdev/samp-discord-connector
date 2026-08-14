@@ -52,7 +52,14 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        submodules: recursive
+        submodules: false
+
+    - name: Initialize submodules
+      shell: bash
+      run: |
+        git config --global url."https://github.com/AmyrAhmady/samp-cmake-modules.git".insteadOf "https://github.com/Zeex/cmake-modules.git"
+        git submodule sync --recursive
+        git submodule update --init --force --depth=1 --recursive
 
     - name: Set env
       run: echo "REPO_TAG=$(git describe --tags --always)" >> $GITHUB_ENV
