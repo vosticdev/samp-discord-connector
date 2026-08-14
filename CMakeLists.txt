@@ -27,6 +27,16 @@ endif()
 
 # -- CONAN
 include(libs/cmake-conan/conan.cmake)
+
+# cmake-conan 0.18 predates recent VS 2022 toolsets and rejects MSVC 19.4x.
+# They still use the Visual Studio 17 Conan ABI/profile, so extend only that
+# version mapping while keeping the pinned Conan 1 integration intact.
+if(MSVC AND NOT MSVC_VERSION VERSION_LESS 1940)
+	function(_get_msvc_ide_version result)
+		set(${result} 17 PARENT_SCOPE)
+	endfunction()
+endif()
+
 function(add_conan_lib pkg_name conan_pkg)
 	conan_check(REQUIRED)
 
