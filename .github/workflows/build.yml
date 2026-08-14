@@ -81,6 +81,23 @@ jobs:
       name: Install Windows Boost headers
       run: vcpkg install boost-asio:x86-windows boost-beast:x86-windows boost-lockfree:x86-windows boost-spirit:x86-windows boost-variant:x86-windows
 
+    - if: runner.os == 'Windows'
+      name: Provide Conan 1 MSVC toolset compatibility
+      shell: pwsh
+      run: |
+        $toolsetsRoot = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC'
+        $currentToolset = Get-ChildItem -LiteralPath $toolsetsRoot -Directory |
+          Where-Object Name -NE '14.3' |
+          Sort-Object Name -Descending |
+          Select-Object -First 1
+        if (-not $currentToolset) {
+          throw 'No Visual Studio 2022 C++ toolset was found.'
+        }
+        $compatibilityPath = Join-Path $toolsetsRoot '14.3'
+        if (-not (Test-Path -LiteralPath $compatibilityPath)) {
+          New-Item -ItemType Junction -Path $compatibilityPath -Target $currentToolset.FullName | Out-Null
+        }
+
     - name: Install conan
       run: |
         python -m pip install --upgrade pip
