@@ -6,6 +6,8 @@
 #include <map>
 #include <thread>
 #include <memory>
+#include <deque>
+#include <atomic>
 
 #include <json.hpp>
 #include <boost/asio/strand.hpp>
@@ -98,6 +100,15 @@ public:
 	~WebSocket();
 
 private: // variables
+	enum class ConnectionState
+	{
+		DISCONNECTED,
+		CONNECTING,
+		AWAITING_HELLO,
+		AUTHENTICATING,
+		READY
+	};
+
 	const int LARGE_THRESHOLD_NUMBER = 100;
 
 	asio::io_context _ioContext;
@@ -108,18 +119,35 @@ private: // variables
 	using WebSocketStream_t = beast::websocket::stream<SslStream_t>;
 	std::unique_ptr<WebSocketStream_t> _websocket;
 
-	bool _reconnect = false;
 	asio::steady_timer _reconnectTimer;
 	unsigned int _reconnectCount = 0;
+	ConnectionState m_ConnectionState = ConnectionState::DISCONNECTED;
+	bool m_ShouldResume = false;
+	bool m_ReconnectScheduled = false;
+	bool m_CloseRequested = false;
+	bool m_CloseInProgress = false;
+	bool m_ReconnectAfterClose = false;
+	std::atomic<bool> m_ShuttingDown{ false };
+	std::deque<std::string> m_WriteQueue;
 
 	beast::multi_buffer _buffer;
 
 	std::string _apiToken;
 	std::string _gatewayUrl;
+	std::string m_ConnectingGatewayUrl;
 	uint64_t _sequenceNumber = 0;
+	bool m_HasSequenceNumber = false;
 	std::string m_SessionId;
+	std::string m_ResumeGatewayUrl;
 	asio::steady_timer m_HeartbeatTimer;
 	std::chrono::steady_clock::duration m_HeartbeatInterval;
+	bool m_AwaitingHeartbeatAck = false;
+	asio::steady_timer m_PresenceTimer;
+	std::chrono::steady_clock::time_point m_LastPresenceUpdate;
+	std::string m_PendingPresenceStatus;
+	std::string m_PendingActivityName;
+	bool m_PresenceUpdatePending = false;
+	bool m_PresenceTimerScheduled = false;
 	std::multimap<Event, EventCallback_t> m_EventMap;
 	int _intents;
 
@@ -135,6 +163,8 @@ private: // functions
 	void OnHandshake(beast::error_code ec);
 
 	void Disconnect(bool reconnect = false);
+	void BeginClose();
+	void ScheduleReconnect();
 	void OnClose(beast::error_code ec);
 	void OnReconnect(beast::error_code ec);
 
@@ -142,13 +172,17 @@ private: // functions
 	void OnRead(beast::error_code ec,
 		std::size_t bytes_transferred);
 
-	void Write(std::string const &data);
+	void Write(std::string data, bool require_authenticated = false);
+	void DoWrite();
 	void OnWrite(beast::error_code ec,
 		size_t bytes_transferred);
 
 	void Identify();
 	void SendResumePayload();
 	void DoHeartbeat(beast::error_code ec);
+	void SendHeartbeat();
+	void ResetSession();
+	void FlushPresence(beast::error_code ec = {});
 
 public: // functions
 	void RegisterEvent(Event event, EventCallback_t &&callback)

@@ -42,10 +42,7 @@ void Http::AddBucketIdentifierFromURL(std::string url, std::string bucket)
 		url.erase(0, url.find("/", 1));
 	}
 
-	if (bucket_urls.find(reduced_url) == bucket_urls.end())
-	{
-		bucket_urls.insert({ reduced_url, bucket });
-	}
+	bucket_urls[reduced_url] = std::move(bucket);
 }
 
 std::string const Http::GetBucketIdentifierFromURL(std::string url)
@@ -77,6 +74,7 @@ void Http::NetworkThreadFunc()
 	unsigned int const MaxRetries = 3;
 	bool skip_entry = false;
 	std::unordered_map<std::string, TimePoint_t> bucket_ratelimit;
+	TimePoint_t global_ratelimit{};
 
 	if (!Connect())
 		return;
@@ -88,6 +86,12 @@ void Http::NetworkThreadFunc()
 		QueueEntry *entry;
 		while (m_Queue.pop(entry))
 		{
+			if (current_time < global_ratelimit)
+			{
+				skipped_entries.push_back(entry);
+				continue;
+			}
+
 			// check if we're rate-limited
 			std::string bucket = GetBucketIdentifierFromURL(entry->Request->target().to_string());
 			auto pr_it = bucket_ratelimit.find(bucket);
@@ -113,8 +117,16 @@ void Http::NetworkThreadFunc()
 			Streambuf_t sb;
 			retry_counter = 0;
 			skip_entry = false;
+			bool requeue_entry = false;
 			do
 			{
+				if (retry_counter > 0)
+				{
+					response = Response_t{};
+					sb.consume(sb.size());
+					error_code.clear();
+				}
+
 				bool do_reconnect = false;
 				beast::http::write(*m_SslStream, *entry->Request, error_code);
 				if (error_code)
@@ -140,8 +152,41 @@ void Http::NetworkThreadFunc()
 					}
 					else if (response.result_int() == 429 /* rate limited */)
 					{
-						Logger::Get()->Log(samplog_LogLevel::ERROR, "Got a 429 from path '{}' (bucket '{}') this should not happen.",
-							entry->Request->target().to_string(), GetBucketIdentifierFromURL(entry->Request->target().to_string()));
+						double retry_after_seconds = 1.0;
+						auto retry_after = response.find("Retry-After");
+						if (retry_after != response.end())
+						{
+							try
+							{
+								retry_after_seconds = std::stod(retry_after->value().to_string());
+							}
+							catch (std::exception const &)
+							{
+								// Keep the conservative one-second fallback.
+							}
+						}
+
+						auto retry_delay = std::chrono::milliseconds(
+							static_cast<long long>(retry_after_seconds * 1000.0) + 250);
+						auto response_bucket = response.find("X-RateLimit-Bucket");
+						if (response_bucket != response.end())
+							AddBucketIdentifierFromURL(entry->Request->target().to_string(),
+								response_bucket->value().to_string());
+						bucket = GetBucketIdentifierFromURL(entry->Request->target().to_string());
+						auto global_header = response.find("X-RateLimit-Global");
+						bool is_global = global_header != response.end()
+							&& global_header->value() == "true";
+						if (is_global)
+							global_ratelimit = std::chrono::steady_clock::now() + retry_delay;
+						else
+							bucket_ratelimit[bucket] = std::chrono::steady_clock::now() + retry_delay;
+						Logger::Get()->Log(samplog_LogLevel::WARNING,
+							"Discord rate-limited path '{}'; retrying in {} ms",
+							entry->Request->target().to_string(), retry_delay.count());
+						skipped_entries.push_back(entry);
+						requeue_entry = true;
+						skip_entry = true;
+						break;
 					}
 				}
 
@@ -157,7 +202,11 @@ void Http::NetworkThreadFunc()
 				}
 			} while (error_code);
 			if (skip_entry)
+			{
+				if (!requeue_entry)
+					delete entry;
 				continue; // continue queue loop
+			}
 
 			auto it_r = response.find("X-RateLimit-Remaining");
 			if (it_r != response.end())
@@ -193,18 +242,17 @@ void Http::NetworkThreadFunc()
 					if (it_r != response.end())
 					{
 						string const& reset_time_str = it_r->value().to_string();
-						long long reset_time_secs = 0;
-						ConvertStrToData(reset_time_str, reset_time_secs);
-						std::chrono::milliseconds milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(reset_time_secs));
-
-						// we have milliseconds too.
-						if (reset_time_str.find(".") != std::string::npos)
+						double reset_after_seconds = 1.0;
+						try
 						{
-							const std::string msstr = reset_time_str.substr(reset_time_str.find(".")+1);
-							long ms;
-							ConvertStrToData(msstr, ms);
-							milliseconds += std::chrono::milliseconds(ms);
+							reset_after_seconds = std::stod(reset_time_str);
 						}
+						catch (std::exception const &)
+						{
+							// Keep the conservative one-second fallback.
+						}
+						std::chrono::milliseconds milliseconds(
+							static_cast<long long>(reset_after_seconds * 1000.0));
 
 						std::chrono::milliseconds timepoint_now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
 						Logger::Get()->Log(samplog_LogLevel::DEBUG, "rate-limiting bucket {} until {} (current time: {})",
@@ -228,7 +276,14 @@ void Http::NetworkThreadFunc()
 
 		// add skipped entries back to queue
 		for (auto e : skipped_entries)
-			m_Queue.push(e);
+		{
+			if (!m_Queue.push(e))
+			{
+				Logger::Get()->Log(samplog_LogLevel::ERROR,
+					"HTTP request queue is full; discarding deferred request");
+				delete e;
+			}
+		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	}
@@ -367,7 +422,13 @@ void Http::SendRequest(beast::http::verb const method, std::string const &url,
 		});
 	}
 
-	m_Queue.push(new QueueEntry(req, std::move(callback)));
+	auto entry = new QueueEntry(req, std::move(callback));
+	if (!m_Queue.push(entry))
+	{
+		Logger::Get()->Log(samplog_LogLevel::ERROR,
+			"HTTP request queue is full; discarding request to '{}'", url);
+		delete entry;
+	}
 }
 
 Http::ResponseCallback_t Http::CreateResponseCallback(ResponseCb_t &&callback)

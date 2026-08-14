@@ -3,6 +3,7 @@
 #include "sdk.hpp"
 
 #include <unordered_map>
+#include <random>
 
 extern logprintf_t logprintf;
 
@@ -12,7 +13,8 @@ WebSocket::WebSocket() :
 	_sslContext(asio::ssl::context::tlsv12_client),
 	_reconnectTimer(_ioContext),
 	m_HeartbeatTimer(_ioContext),
-	m_HeartbeatInterval()
+	m_HeartbeatInterval(),
+	m_PresenceTimer(_ioContext)
 {
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::WebSocket");
 }
@@ -21,6 +23,7 @@ WebSocket::~WebSocket()
 {
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::~WebSocket");
 
+	m_ShuttingDown = true;
 	Disconnect();
 
 	if (_netThread)
@@ -45,9 +48,15 @@ void WebSocket::Initialize(std::string token, std::string gateway_url, int inten
 void WebSocket::Connect()
 {
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::Connect");
+	m_ConnectionState = ConnectionState::CONNECTING;
+	m_CloseRequested = false;
+	m_CloseInProgress = false;
+	m_ReconnectScheduled = false;
+	m_ConnectingGatewayUrl = m_ShouldResume && !m_ResumeGatewayUrl.empty()
+		? m_ResumeGatewayUrl : _gatewayUrl;
 
 	_resolver.async_resolve(
-		_gatewayUrl,
+		m_ConnectingGatewayUrl,
 		"443",
 		beast::bind_front_handler(
 			&WebSocket::OnResolve,
@@ -134,7 +143,7 @@ void WebSocket::OnSslHandshake(beast::error_code ec)
 	}));
 
 	_websocket->async_handshake(
-		_gatewayUrl + ":443", 
+		m_ConnectingGatewayUrl + ":443",
 		"/?encoding=json&v=10",
 		beast::bind_front_handler(
 			&WebSocket::OnHandshake,
@@ -154,29 +163,62 @@ void WebSocket::OnHandshake(beast::error_code ec)
 		return;
 	}
 
-	_reconnectCount = 0;
+	m_ConnectionState = ConnectionState::AWAITING_HELLO;
 
-	// read before identifying/resuming to make sure we catch the result
+	// Discord requires HELLO before IDENTIFY or RESUME.
 	Read();
-	if (_reconnect)
-		SendResumePayload();
-	else
-		Identify();
 }
 
 void WebSocket::Disconnect(bool reconnect /*= false*/)
 {
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::Disconnect");
 
-	_reconnect = reconnect;
-
-	if (_websocket)
+	asio::post(_ioContext, [this, reconnect]()
 	{
+		if (!reconnect)
+		{
+			m_ReconnectAfterClose = false;
+			_reconnectTimer.cancel();
+		}
+		else if (!m_ShuttingDown)
+		{
+			m_ReconnectAfterClose = true;
+		}
+		m_CloseRequested = true;
+		m_HeartbeatTimer.cancel();
+
+		// async_close is a write operation. Wait for the active user write first.
+		if (m_WriteQueue.empty())
+			BeginClose();
+	});
+}
+
+void WebSocket::BeginClose()
+{
+	if (!m_CloseRequested || m_CloseInProgress)
+		return;
+	if (!_websocket)
+	{
+		m_CloseRequested = false;
+		OnClose({});
+		return;
+	}
+
+	m_CloseRequested = false;
+	m_CloseInProgress = true;
+	if (_websocket->is_open())
+	{
+		beast::websocket::close_reason reason;
+		reason.code = m_ReconnectAfterClose
+			? static_cast<beast::websocket::close_code>(4000)
+			: beast::websocket::close_code::normal;
 		_websocket->async_close(
-			beast::websocket::close_code::normal,
-			beast::bind_front_handler(
-				&WebSocket::OnClose,
-				this));
+			reason,
+			beast::bind_front_handler(&WebSocket::OnClose, this));
+	}
+	else
+	{
+		OnClose({});
 	}
 }
 
@@ -186,26 +228,39 @@ void WebSocket::OnClose(beast::error_code ec)
 
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::OnClose");
 
+	m_CloseInProgress = false;
 	m_HeartbeatTimer.cancel();
+	m_PresenceTimer.cancel();
+	m_PresenceTimerScheduled = false;
+	m_ConnectionState = ConnectionState::DISCONNECTED;
+	m_AwaitingHeartbeatAck = false;
+	m_WriteQueue.clear();
 
-	if (_reconnect)
-	{
-		auto time = std::chrono::seconds(
-			std::min(_reconnectCount * 5, 60u));
+	if (m_ReconnectAfterClose && !m_ShuttingDown)
+		ScheduleReconnect();
+}
 
-		if (time.count() > 0)
-		{
-			Logger::Get()->Log(samplog_LogLevel::INFO,
-				"reconnecting in {:d} seconds",
-				time.count());
-		}
+void WebSocket::ScheduleReconnect()
+{
+	if (m_ReconnectScheduled || m_ShuttingDown)
+		return;
 
-		_reconnectTimer.expires_from_now(time);
-		_reconnectTimer.async_wait(
-			beast::bind_front_handler(
-				&WebSocket::OnReconnect,
-				this));
-	}
+	m_ReconnectScheduled = true;
+	m_ReconnectAfterClose = false;
+	++_reconnectCount;
+
+	// Capped exponential backoff with jitter prevents reconnect storms.
+	unsigned int exponent = std::min(_reconnectCount, 6u);
+	unsigned int maximum = std::min(1u << exponent, 60u);
+	std::random_device rd;
+	std::uniform_int_distribution<unsigned int> jitter(maximum / 2, maximum);
+	auto delay = std::chrono::seconds(jitter(rd));
+
+	Logger::Get()->Log(samplog_LogLevel::INFO,
+		"reconnecting in {:d} seconds", delay.count());
+	_reconnectTimer.expires_from_now(delay);
+	_reconnectTimer.async_wait(
+		beast::bind_front_handler(&WebSocket::OnReconnect, this));
 }
 
 void WebSocket::OnReconnect(beast::error_code ec)
@@ -228,7 +283,7 @@ void WebSocket::OnReconnect(beast::error_code ec)
 		return;
 	}
 
-	++_reconnectCount;
+	m_ReconnectScheduled = false;
 	Connect();
 }
 
@@ -253,34 +308,55 @@ void WebSocket::OnRead(beast::error_code ec,
 	if (ec)
 	{
 		bool reconnect = false;
-		switch (ec.value())
+		if (ec == beast::websocket::error::closed
+			|| ec == asio::ssl::error::stream_errors::stream_truncated)
 		{
-		case asio::ssl::error::stream_errors::stream_truncated:
+			auto close_code = static_cast<unsigned int>(_websocket->reason().code);
 			Logger::Get()->Log(samplog_LogLevel::ERROR,
 				"Discord terminated websocket connection; reason: {} ({})",
 				_websocket->reason().reason.c_str(),
-				_websocket->reason().code);
+				close_code);
 
-			if (_websocket->reason().code == 4014)
+			switch (close_code)
+			{
+			case 4003: // not authenticated / invalidated session
+			case 4005: // already authenticated
+			case 4007: // invalid sequence
+			case 4009: // session timed out
+			case 1000: // normal close invalidates the session
+			case 1001:
+				ResetSession();
+				reconnect = true;
+				break;
+			case 4004: // authentication failed
+			case 4010: // invalid shard
+			case 4011: // sharding required
+			case 4012: // invalid API version
+			case 4013: // invalid intents
+			case 4014: // disallowed intents
+				reconnect = false;
+				break;
+			default:
+				reconnect = true;
+				break;
+			}
+
+			if (close_code == 4014)
 			{
 				logprintf(" >> discord-connector: bot could not connect due to intent permissions. Modify your discord bot settings and enable every intent.");
-				reconnect = false;
 			}
-			else
-			{
-				reconnect = true;
-			}
-			break;
-		case asio::error::operation_aborted:
+		}
+		else if (ec == asio::error::operation_aborted)
+		{
 			// connection was closed, do nothing
-			break;
-		default:
+		}
+		else
+		{
 			Logger::Get()->Log(samplog_LogLevel::ERROR,
 				"Can't read from Discord websocket gateway: {} ({})",
 				ec.message(),
 				ec.value());
 			reconnect = true;
-			break;
 		}
 
 		if (reconnect)
@@ -289,11 +365,27 @@ void WebSocket::OnRead(beast::error_code ec,
 				"websocket gateway connection terminated; attempting reconnect...");
 			Disconnect(true);
 		}
+		else if (ec == beast::websocket::error::closed
+			|| ec == asio::ssl::error::stream_errors::stream_truncated)
+		{
+			Disconnect(false);
+		}
 		return;
 	}
 
-	json result = json::parse(
-		beast::buffers_to_string(_buffer.data()));
+	json result;
+	try
+	{
+		result = json::parse(beast::buffers_to_string(_buffer.data()));
+	}
+	catch (json::exception const &e)
+	{
+		Logger::Get()->Log(samplog_LogLevel::ERROR,
+			"invalid Discord gateway payload: {}", e.what());
+		_buffer.clear();
+		Disconnect(true);
+		return;
+	}
 	_buffer.clear();
 
 	int payload_opcode = result["op"].get<int>();
@@ -302,6 +394,7 @@ void WebSocket::OnRead(beast::error_code ec,
 	case 0:
 	{
 		_sequenceNumber = result["s"];
+		m_HasSequenceNumber = true;
 
 #define __WS_EVENT_MAP_PAIR(event) { #event, Event::event }
 		static const std::unordered_map<std::string, Event> events_map{
@@ -383,7 +476,30 @@ void WebSocket::OnRead(beast::error_code ec,
 			Event event = it->second;
 
 			if (event == Event::READY)
+			{
 				m_SessionId = data["session_id"].get<std::string>();
+				if (data.find("resume_gateway_url") != data.end())
+				{
+					m_ResumeGatewayUrl = data["resume_gateway_url"].get<std::string>();
+					auto protocol = m_ResumeGatewayUrl.find("wss://");
+					if (protocol == 0)
+						m_ResumeGatewayUrl.erase(0, 6);
+					auto slash = m_ResumeGatewayUrl.find('/');
+					if (slash != std::string::npos)
+						m_ResumeGatewayUrl.erase(slash);
+				}
+				m_ShouldResume = true;
+				m_ConnectionState = ConnectionState::READY;
+				_reconnectCount = 0;
+				FlushPresence();
+			}
+			else if (event == Event::RESUMED)
+			{
+				m_ShouldResume = true;
+				m_ConnectionState = ConnectionState::READY;
+				_reconnectCount = 0;
+				FlushPresence();
+			}
 
 			auto event_range = m_EventMap.equal_range(event);
 			for (auto ev_it = event_range.first; ev_it != event_range.second; ++ev_it)
@@ -401,16 +517,38 @@ void WebSocket::OnRead(beast::error_code ec,
 		Disconnect(true);
 		return;
 	case 9: // invalid session
-		Identify();
-		break;
+		m_ShouldResume = result["d"].is_boolean() && result["d"].get<bool>()
+			&& !m_SessionId.empty() && m_HasSequenceNumber;
+		if (!m_ShouldResume)
+			ResetSession();
+		Disconnect(true);
+		return;
 	case 10: // hello
 		// at this point we're connected to the gateway, but not authenticated
 		// start heartbeat
 		m_HeartbeatInterval = std::chrono::milliseconds(result["d"]["heartbeat_interval"]);
-		DoHeartbeat({});
+		m_AwaitingHeartbeatAck = false;
+		{
+			std::random_device rd;
+			std::uniform_real_distribution<double> jitter(0.0, 1.0);
+			m_HeartbeatTimer.expires_from_now(
+				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+					m_HeartbeatInterval * jitter(rd)));
+			m_HeartbeatTimer.async_wait(
+				beast::bind_front_handler(&WebSocket::DoHeartbeat, this));
+		}
+		m_ConnectionState = ConnectionState::AUTHENTICATING;
+		if (m_ShouldResume && !m_SessionId.empty() && m_HasSequenceNumber)
+			SendResumePayload();
+		else
+			Identify();
 		break;
 	case 11: // heartbeat ACK
+		m_AwaitingHeartbeatAck = false;
 		Logger::Get()->Log(samplog_LogLevel::DEBUG, "heartbeat ACK");
+		break;
+	case 1: // Discord requested an immediate heartbeat
+		SendHeartbeat();
 		break;
 	default:
 		Logger::Get()->Log(samplog_LogLevel::WARNING, "Unhandled payload opcode '{}'", payload_opcode);
@@ -420,15 +558,32 @@ void WebSocket::OnRead(beast::error_code ec,
 	Read();
 }
 
-void WebSocket::Write(std::string const &data)
+void WebSocket::Write(std::string data, bool require_authenticated /*= false*/)
 {
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::Write");
 
+	asio::post(_ioContext, [this, data = std::move(data), require_authenticated]() mutable
+	{
+		if (!_websocket || !_websocket->is_open() || m_CloseRequested)
+			return;
+		if (require_authenticated && m_ConnectionState != ConnectionState::READY)
+			return;
+
+		bool idle = m_WriteQueue.empty();
+		m_WriteQueue.emplace_back(std::move(data));
+		if (idle)
+			DoWrite();
+	});
+}
+
+void WebSocket::DoWrite()
+{
+	if (m_WriteQueue.empty() || !_websocket || !_websocket->is_open())
+		return;
+
 	_websocket->async_write(
-		asio::buffer(data),
-		beast::bind_front_handler(
-			&WebSocket::OnWrite,
-			this));
+		asio::buffer(m_WriteQueue.front()),
+		beast::bind_front_handler(&WebSocket::OnWrite, this));
 }
 
 void WebSocket::OnWrite(beast::error_code ec,
@@ -444,8 +599,17 @@ void WebSocket::OnWrite(beast::error_code ec,
 			"Can't write to Discord websocket gateway: {} ({})",
 			ec.message(), ec.value());
 
-		// we don't handle reconnects here, as the read handler already does this
+		m_WriteQueue.clear();
+		Disconnect(true);
+		return;
 	}
+
+	if (!m_WriteQueue.empty())
+		m_WriteQueue.pop_front();
+	if (!m_WriteQueue.empty())
+		DoWrite();
+	else if (m_CloseRequested)
+		BeginClose();
 }
 
 void WebSocket::Identify()
@@ -508,32 +672,66 @@ void WebSocket::RequestGuildMembers(std::string guild_id)
 		} }
 	};
 
-	Write(payload.dump());
+	Write(payload.dump(), true);
 }
 
 void WebSocket::UpdateStatus(std::string const &status, std::string const &activity_name)
 {
 	Logger::Get()->Log(samplog_LogLevel::DEBUG, "WebSocket::UpdateStatus");
+	asio::post(_ioContext, [this, status, activity_name]()
+	{
+		m_PendingPresenceStatus = status;
+		m_PendingActivityName = activity_name;
+		m_PresenceUpdatePending = true;
+		FlushPresence();
+	});
+}
+
+void WebSocket::FlushPresence(beast::error_code ec /*= {}*/)
+{
+	if (ec == asio::error::operation_aborted)
+		return;
+	m_PresenceTimerScheduled = false;
+
+	if (!m_PresenceUpdatePending || m_ConnectionState != ConnectionState::READY)
+		return;
+
+	auto now = std::chrono::steady_clock::now();
+	auto minimum_interval = std::chrono::seconds(15);
+	if (m_LastPresenceUpdate.time_since_epoch().count() != 0
+		&& now - m_LastPresenceUpdate < minimum_interval)
+	{
+		if (!m_PresenceTimerScheduled)
+		{
+			m_PresenceTimerScheduled = true;
+			m_PresenceTimer.expires_at(m_LastPresenceUpdate + minimum_interval);
+			m_PresenceTimer.async_wait(
+				beast::bind_front_handler(&WebSocket::FlushPresence, this));
+		}
+		return;
+	}
 
 	json payload = {
 		{ "op", 3 },
 		{ "d", {
 			{ "since", nullptr },
-			{ "game", nullptr },
-			{ "status", status },
+			{ "activities", json::array() },
+			{ "status", m_PendingPresenceStatus },
 			{ "afk", false },
 		} }
 	};
 
-	if (!activity_name.empty())
+	if (!m_PendingActivityName.empty())
 	{
-		payload.at("d").at("game") = {
-			{ "name", activity_name },
+		payload.at("d").at("activities").push_back({
+			{ "name", m_PendingActivityName },
 			{ "type", 0 }
-		};
+		});
 	}
 
-	Write(payload.dump());
+	m_PresenceUpdatePending = false;
+	m_LastPresenceUpdate = now;
+	Write(payload.dump(), true);
 }
 
 void WebSocket::DoHeartbeat(beast::error_code ec)
@@ -556,17 +754,40 @@ void WebSocket::DoHeartbeat(beast::error_code ec)
 		return;
 	}
 
-	json heartbeat_payload = {
-		{ "op", 1 },
-		{ "d", _sequenceNumber }
-	};
+	if (m_AwaitingHeartbeatAck)
+	{
+		Logger::Get()->Log(samplog_LogLevel::WARNING,
+			"heartbeat ACK was not received; reconnecting gateway");
+		Disconnect(true);
+		return;
+	}
 
-	Logger::Get()->Log(samplog_LogLevel::DEBUG, "sending heartbeat");
-	Write(heartbeat_payload.dump());
+	SendHeartbeat();
 
 	m_HeartbeatTimer.expires_from_now(m_HeartbeatInterval);
 	m_HeartbeatTimer.async_wait(
 		beast::bind_front_handler(
 			&WebSocket::DoHeartbeat,
 			this));
+}
+
+void WebSocket::SendHeartbeat()
+{
+	json heartbeat_payload = {
+		{ "op", 1 },
+		{ "d", m_HasSequenceNumber ? json(_sequenceNumber) : json(nullptr) }
+	};
+
+	Logger::Get()->Log(samplog_LogLevel::DEBUG, "sending heartbeat");
+	m_AwaitingHeartbeatAck = true;
+	Write(heartbeat_payload.dump());
+}
+
+void WebSocket::ResetSession()
+{
+	m_ShouldResume = false;
+	m_SessionId.clear();
+	m_ResumeGatewayUrl.clear();
+	_sequenceNumber = 0;
+	m_HasSequenceNumber = false;
 }
