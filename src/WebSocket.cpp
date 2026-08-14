@@ -258,7 +258,7 @@ void WebSocket::ScheduleReconnect()
 
 	Logger::Get()->Log(samplog_LogLevel::INFO,
 		"reconnecting in {:d} seconds", delay.count());
-	_reconnectTimer.expires_from_now(delay);
+	_reconnectTimer.expires_after(delay);
 	_reconnectTimer.async_wait(
 		beast::bind_front_handler(&WebSocket::OnReconnect, this));
 }
@@ -531,7 +531,7 @@ void WebSocket::OnRead(beast::error_code ec,
 		{
 			std::random_device rd;
 			std::uniform_real_distribution<double> jitter(0.0, 1.0);
-			m_HeartbeatTimer.expires_from_now(
+			m_HeartbeatTimer.expires_after(
 				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 					m_HeartbeatInterval * jitter(rd)));
 			m_HeartbeatTimer.async_wait(
@@ -764,7 +764,7 @@ void WebSocket::DoHeartbeat(beast::error_code ec)
 
 	SendHeartbeat();
 
-	m_HeartbeatTimer.expires_from_now(m_HeartbeatInterval);
+	m_HeartbeatTimer.expires_after(m_HeartbeatInterval);
 	m_HeartbeatTimer.async_wait(
 		beast::bind_front_handler(
 			&WebSocket::DoHeartbeat,
