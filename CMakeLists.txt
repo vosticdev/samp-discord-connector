@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 cmake_policy(SET CMP0091 NEW)
-project(discord-connector VERSION 0.4.0)
+project(discord-connector VERSION 0.4.1)
 
 if (NOT DCC_VERSION) # allow version override
 	set(DCC_VERSION ${PROJECT_VERSION})
