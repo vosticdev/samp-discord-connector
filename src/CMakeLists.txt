@@ -142,6 +142,9 @@ target_link_libraries(discord-connector log-core CONAN_PKG::fmt OMP-SDK)
 if(UNIX)
 	if(NOT APPLE)
 		target_link_libraries(discord-connector rt)
+		target_link_options(discord-connector PRIVATE
+			-Wl,--no-undefined
+		)
 	endif()
 	
 	set_target_properties(discord-connector PROPERTIES

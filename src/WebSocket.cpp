@@ -5,6 +5,19 @@
 #include <unordered_map>
 #include <random>
 
+namespace
+{
+	std::mt19937 &JitterGenerator()
+	{
+		// Gateway jitter is not security-sensitive. Avoid std::random_device here:
+		// some 32-bit Linux libstdc++ combinations leave its ABI symbol unresolved
+		// in a shared plugin, which prevents the server from loading the component.
+		static thread_local std::mt19937 generator(static_cast<std::mt19937::result_type>(
+			std::chrono::steady_clock::now().time_since_epoch().count()));
+		return generator;
+	}
+}
+
 extern logprintf_t logprintf;
 
 WebSocket::WebSocket() :
@@ -252,9 +265,8 @@ void WebSocket::ScheduleReconnect()
 	// Capped exponential backoff with jitter prevents reconnect storms.
 	unsigned int exponent = std::min(_reconnectCount, 6u);
 	unsigned int maximum = std::min(1u << exponent, 60u);
-	std::random_device rd;
 	std::uniform_int_distribution<unsigned int> jitter(maximum / 2, maximum);
-	auto delay = std::chrono::seconds(jitter(rd));
+	auto delay = std::chrono::seconds(jitter(JitterGenerator()));
 
 	Logger::Get()->Log(samplog_LogLevel::INFO,
 		"reconnecting in {:d} seconds", delay.count());
@@ -529,11 +541,10 @@ void WebSocket::OnRead(beast::error_code ec,
 		m_HeartbeatInterval = std::chrono::milliseconds(result["d"]["heartbeat_interval"]);
 		m_AwaitingHeartbeatAck = false;
 		{
-			std::random_device rd;
 			std::uniform_real_distribution<double> jitter(0.0, 1.0);
 			m_HeartbeatTimer.expires_after(
 				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-					m_HeartbeatInterval * jitter(rd)));
+					m_HeartbeatInterval * jitter(JitterGenerator())));
 			m_HeartbeatTimer.async_wait(
 				beast::bind_front_handler(&WebSocket::DoHeartbeat, this));
 		}
